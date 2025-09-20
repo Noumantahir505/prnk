@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Image Loading</title>
+<style>
+  :root{
+    --bg:#000;
+    --muted:#9fb2c6;
+    --accent:#2ec4ff;
+    --panel: rgba(255,255,255,0.02);
+    --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, "Roboto Mono", "Courier New", monospace;
+  }
+  html,body{height:100%;margin:0;background:var(--bg);font-family:Inter,system-ui,Segoe UI,Roboto,Arial;color:#e6eef6}
+  /* Make it occupy whole viewport so it *looks* fullscreen even if real fullscreen denied */
+  .wrap{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px;box-sizing:border-box}
+  .panel{width:100%;max-width:640px;border-radius:18px;padding:20px;background:linear-gradient(180deg, rgba(255,255,255,0.01), rgba(255,255,255,0.02));box-shadow:0 20px 60px rgba(0,0,0,0.6)}
+  .screen{background:linear-gradient(180deg,#000,#020204);border-radius:12px;overflow:hidden;padding:28px;min-height:520px;position:relative;display:flex;flex-direction:column;align-items:center}
+  .logo{width:96px;height:96px;border-radius:20px;background:linear-gradient(135deg,var(--accent),#68fff0);display:flex;align-items:center;justify-content:center;font-weight:800;color:#001;font-size:28px;box-shadow:0 12px 36px rgba(0,0,0,0.6)}
+  .status{margin-top:18px;color:var(--muted);font-size:15px;text-align:center;max-width:88%}
+  .progress-wrap{width:88%;margin-top:20px}
+  .bar{height:12px;background:rgba(255,255,255,0.04);border-radius:999px;overflow:hidden}
+  .inner{height:100%;width:0%;background:linear-gradient(90deg,var(--accent),#7af2ff);transition:width 0.25s linear}
+  .logs{margin-top:18px;height:160px;overflow:auto;width:92%;background:rgba(255,255,255,0.02);padding:12px;border-radius:8px;font-family:var(--mono);font-size:13px;color:var(--muted)}
+  .blackout{position:absolute;inset:0;background:#000;opacity:0;pointer-events:none;transition:opacity .22s ease}
+  .message{background: rgba(255, 255, 255, 0.1); 
+  backdrop-filter: blur(10px);    
+  -webkit-backdrop-filter: blur(10px); 
+  border-radius: 12px; 
+  border: 1px solid rgba(255, 255, 255, 0.1); position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;      /* viewport width */
+  height: 100vh;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:10px;padding:30px;text-align:center;opacity:0;transform:translateY(8px);transition:opacity .4s ease,transform .4s ease}
+  .message.show{opacity:1;transform:none;color:red}
+  .message h1{font-size:32px;margin:0;color:red}
+  .hint{position:absolute;bottom:78px;left:12px;color:white;font-size:16px}
+  @media (max-width:420px){
+    .screen{min-height:100vh;padding:18px;border-radius:0}
+    .logo{width:78px;height:78px;font-size:22px}
+    .logs{height:120px}
+  }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="panel" role="application" aria-label="Fake restart">
+      <div class="screen" id="screen">
+        <div class="logo" id="logo">PNG</div>
+        <div class="status" id="status">Preparing image...</div>
+
+        <div class="progress-wrap">
+          <div class="bar"><div class="inner" id="inner"></div></div>
+        </div>
+
+        <div class="logs" id="logs" aria-live="polite">
+          &gt; System idle.
+        </div>
+
+        <div class="blackout" id="blackout"></div>
+
+        <div class="message" id="message" aria-hidden="true">
+          <h1 id="msgTitle">Warning!</h1>
+          <div id="msgText">Your whatsapp has accessed by anonymous!!</div>
+        </div>
+
+        <div class="hint" id="hint" style="display:none">click anywhere to stop image execution</div>
+      </div>
+    </div>
+  </div>
+
+<script>
+(function(){
+  // TOTAL duration in seconds
+  const TOTAL_SECONDS = 20;
+  const startTime = Date.now();
+  const inner = document.getElementById('inner');
+  const logs = document.getElementById('logs');
+  const status = document.getElementById('status');
+  const blackout = document.getElementById('blackout');
+  const message = document.getElementById('message');
+  const hint = document.getElementById('hint');
+
+  // Predefined staged messages to append over time
+  const preShutdown = [
+    "Stopping services",
+    "Flushing caches",
+    "Closing network interfaces",
+    "Saving user sessions",
+    "Unmounting user volumes",
+    "Power manager: shutting down subsystems"
+  ];
+  const bootLogs = [
+    "Bootloader: initializing hardware",
+    "Memory check: OK",
+    "Detecting displays",
+    "Mounting filesystem",
+    "Starting core daemons",
+    "Security: verifying signatures",
+    "Network: configuring interfaces",
+    "User profile: loading"
+  ];
+
+  // Combine timeline: we will spend about half time in shutdown illusion, brief blackout, then half in boot
+  const half = TOTAL_SECONDS/2; // seconds for shutdown-phase and boot-phase approx
+
+  // Helper to append logs
+  function appendLog(text){
+    const d = document.createElement('div');
+    d.textContent = "> " + text;
+    logs.appendChild(d);
+    logs.scrollTop = logs.scrollHeight;
+  }
+
+  // Start animation immediately
+  let started = true;
+  let phase = 'shutdown'; // shutdown -> blackout -> boot -> finished
+  let elapsed = 0;
+
+  // populate initial quick log
+  appendLog("System check initiated.");
+
+  // Smooth progress updater: update every 250ms
+  const tickMs = 250;
+  const ticksTotal = (TOTAL_SECONDS*1000)/tickMs;
+  let tickCount = 0;
+
+  // Speed control: schedule log insertions across each half
+  let shutdownLogInterval = Math.max(1, Math.floor((half*1000)/ (preShutdown.length * tickMs)));
+  let bootLogInterval = Math.max(1, Math.floor((half*1000)/ (bootLogs.length * tickMs)));
+
+  let sLogIndex = 0, bLogIndex = 0;
+
+  const t = setInterval(()=> {
+    tickCount++;
+    elapsed = (Date.now() - startTime)/1000;
+
+    // determine phase by elapsed
+    if (elapsed < half - 0.8) phase = 'shutdown';
+    else if (elapsed < half - 0.2) phase = 'blackout';
+    else if (elapsed < TOTAL_SECONDS - 1.2) phase = 'boot';
+    else phase = 'finalizing';
+
+    // progress percent (0..100) mapped to elapsed/TOTAL_SECONDS
+    const pct = Math.min(100, Math.floor((elapsed / TOTAL_SECONDS) * 100));
+    inner.style.width = pct + '%';
+
+    // phase-specific behaviour
+    if (phase === 'shutdown') {
+      status.textContent = "Shutting down services...";
+      // append shutdown logs periodically
+      if (tickCount % shutdownLogInterval === 0 && sLogIndex < preShutdown.length) {
+        appendLog(preShutdown[sLogIndex++]);
+      }
+    } else if (phase === 'blackout') {
+      // quick blackout flash to simulate power-off
+      blackout.style.opacity = 1;
+      status.textContent = "";
+    } else if (phase === 'boot') {
+      // restore visibility
+      blackout.style.opacity = 0;
+      status.textContent = "Bootloader: initializing...";
+      // append boot logs periodically
+      if (tickCount % bootLogInterval === 0 && bLogIndex < bootLogs.length) {
+        appendLog(bootLogs[bLogIndex++]);
+      }
+    } else if (phase === 'finalizing') {
+      status.textContent = "";
+      inner.style.width = '100%';
+    }
+
+    // when elapsed reaches TOTAL_SECONDS, show final message and stop
+    if (elapsed >= TOTAL_SECONDS) {
+      clearInterval(t);
+      // small final flash then reveal message
+      blackout.style.opacity = 1;
+      setTimeout(()=> {
+        blackout.style.opacity = 0;
+        message.classList.add('show');
+        message.setAttribute('aria-hidden','false');
+        appendLog("System: ready. User session restored.");
+      }, 380);
+    }
+
+  }, tickMs);
+
+  // Fullscreen attempt on load (many browsers will block this)
+  function tryAutoFullscreen(){
+    const el = document.documentElement;
+    if (el.requestFullscreen) {
+      el.requestFullscreen().catch(()=> {
+        // denied: show hint to user to tap
+        hint.style.display = 'block';
+      });
+    } else if (el.webkitRequestFullscreen) {
+      try{ el.webkitRequestFullscreen(); }catch(e){ hint.style.display = 'block'; }
+    } else {
+      // no fullscreen API: show hint
+      hint.style.display = 'block';
+    }
+  }
+
+  // Try to go fullscreen right away (may be blocked)
+  tryAutoFullscreen();
+
+  // Also attach first-touch gesture to go fullscreen (this will succeed)
+  function onFirstInteraction(){
+    const el = document.documentElement;
+    if (el.requestFullscreen) el.requestFullscreen().catch(()=>{});
+    else if (el.webkitRequestFullscreen) try{ el.webkitRequestFullscreen(); }catch(e){}
+    // remove listeners after first use
+    document.removeEventListener('click', onFirstInteraction);
+    document.removeEventListener('touchstart', onFirstInteraction);
+    hint.style.display = 'none';
+  }
+  document.addEventListener('click', onFirstInteraction, {passive:true});
+  document.addEventListener('touchstart', onFirstInteraction, {passive:true});
+
+  // accessibility: allow Enter to trigger fullscreen
+  document.addEventListener('keydown', (e)=> { if(e.key === 'Enter'){ onFirstInteraction(); } });
+
+})();
+</script>
+</body>
+</html>
